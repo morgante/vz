@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"io"
 	l "log"
 	"os"
@@ -93,7 +94,6 @@ func main() {
 		log.Fatalf("Serial port attachment creation failed: %s", err)
 	}
 
-
 	// console
 	consoleConfig, err := vz.NewVirtioConsoleDeviceSerialPortConfiguration(serialPortAttachment)
 	if err != nil {
@@ -146,13 +146,14 @@ func main() {
 	})
 
 	// traditional memory balloon device which allows for managing guest memory. (optional)
-	memoryBalloonDevice, err := vz.NewVirtioTraditionalMemoryBalloonDeviceConfiguration()
-	if err != nil {
-		log.Fatalf("Balloon device creation failed: %s", err)
-	}
-	config.SetMemoryBalloonDevicesVirtualMachineConfiguration([]vz.MemoryBalloonDeviceConfiguration{
-		memoryBalloonDevice,
-	})
+	// Note this is not supported for snapshotting
+	// memoryBalloonDevice, err := vz.NewVirtioTraditionalMemoryBalloonDeviceConfiguration()
+	// if err != nil {
+	// 	log.Fatalf("Balloon device creation failed: %s", err)
+	// }
+	// config.SetMemoryBalloonDevicesVirtualMachineConfiguration([]vz.MemoryBalloonDeviceConfiguration{
+	// 	memoryBalloonDevice,
+	// })
 
 	// socket device (optional)
 	vsockDevice, err := vz.NewVirtioSocketDeviceConfiguration()
@@ -167,6 +168,12 @@ func main() {
 		log.Fatal("validation failed", err)
 	}
 
+	// Validate it supports save state
+	supportsSaveMachineState, err := config.ValidateSaveRestoreSupport()
+	if !supportsSaveMachineState || err != nil {
+		log.Fatal("save state is not supported", err)
+	}
+
 	vm, err := vz.NewVirtualMachine(config)
 	if err != nil {
 		log.Fatalf("Virtual machine creation failed: %s", err)
@@ -176,12 +183,10 @@ func main() {
 	signal.Notify(signalCh, syscall.SIGTERM)
 
 	log.Println("start vm")
-	
 
 	if err := vm.Start(); err != nil {
 		log.Fatalf("Start virtual machine is failed: %s", err)
 	}
-
 
 	// Start a goroutine to write to the virtual stdin
 	go func() {
@@ -223,23 +228,80 @@ done
 			log.Printf("Failed to write to virtual stdin: %s", err)
 		}
 
-		time.Sleep(5000 * time.Millisecond)
+		time.Sleep(2000 * time.Millisecond)
 
-		virtualStdinWriter.Close()
-	
-		// Stop the VM
-		log.Println("Request stop VM")
-		result, err := vm.RequestStop()
+		// Check if we can pause
+		if !vm.CanPause() {
+			log.Println("VM cannot pause")
+			os.Exit(1)
+			_, err := vm.RequestStop()
+			if err != nil {
+				log.Println("request stop error:", err)
+				os.Exit(1)
+			}
+		}
+
+		log.Println("Request pause VM")
+		if err := vm.Pause(); err != nil {
+			log.Println("request pause error:", err)
+			os.Exit(1)
+		}
+
+		// Delete the save file first
+		if err := os.Remove("savestate"); err != nil {
+			log.Println("remove save state error:", err)
+		}
+
+		if err := vm.SaveMachineStateToPath("savestate"); err != nil {
+			log.Println("save state with error", err)
+			os.Exit(1)
+		}
+
+		log.Println("VM paused")
+
+		// Now just kill the VM
+		if err := vm.Stop(); err != nil {
+			log.Println("stop error:", err)
+			os.Exit(1)
+		}
+
+		// Wait for 1 second
+		time.Sleep(1 * time.Second)
+
+		// Now let's make a whole new VM with the same config
+		newVM, err := vz.NewVirtualMachine(config)
 		if err != nil {
-			log.Println("request stop error:", err)
+			log.Println("new VM creation failed:", err)
+			os.Exit(1)
 		}
-		
-		// if it stopped, finish the program
-		if result {
-			log.Println("stopped successfully")
-			os.Exit(0)
-			return
+
+		if err := newVM.RestoreMachineStateFromURL("savestate"); err != nil {
+			log.Println("restore state error:", err)
+			os.Exit(1)
 		}
+
+		fmt.Println("VM restored")
+
+		// Resume the VM
+		if err := newVM.Resume(); err != nil {
+			log.Println("resume error:", err)
+			os.Exit(1)
+		}
+
+		// Now wait 5 seconds
+		time.Sleep(5 * time.Second)
+
+		// Kill the VM
+		if err := newVM.Stop(); err != nil {
+			log.Println("stop error:", err)
+			os.Exit(1)
+		}
+
+		log.Println("VM successfully started and stopped")
+
+		// Stop the VM
+		virtualStdinWriter.Close()
+		os.Exit(0)
 
 	}()
 
@@ -252,7 +314,6 @@ done
 			result, err := vm.RequestStop()
 			if err != nil {
 				log.Println("request stop error:", err)
-				return
 			}
 			log.Println("recieved signal", result)
 		case newState := <-vm.StateChangedNotify():
@@ -261,7 +322,6 @@ done
 			}
 			if newState == vz.VirtualMachineStateStopped {
 				log.Println("stopped successfully")
-				return
 			}
 		case err := <-errCh:
 			log.Println("in start:", err)
