@@ -1,11 +1,13 @@
 package main
 
 import (
+	"io"
 	l "log"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/Code-Hex/vz/v3"
 	"github.com/pkg/term/termios"
@@ -79,13 +81,20 @@ func main() {
 		log.Fatalf("failed to create virtual machine configuration: %s", err)
 	}
 
-	setRawMode(os.Stdin)
+	// Create a pipe for virtual stdin
+	virtualStdin, virtualStdinWriter, err := os.Pipe()
+	if err != nil {
+		log.Fatalf("Failed to create virtual stdin pipe: %s", err)
+	}
 
-	// console
-	serialPortAttachment, err := vz.NewFileHandleSerialPortAttachment(os.Stdin, os.Stdout)
+	// Use the read end of the pipe as virtual stdin
+	serialPortAttachment, err := vz.NewFileHandleSerialPortAttachment(virtualStdin, os.Stdout)
 	if err != nil {
 		log.Fatalf("Serial port attachment creation failed: %s", err)
 	}
+
+
+	// console
 	consoleConfig, err := vz.NewVirtioConsoleDeviceSerialPortConfiguration(serialPortAttachment)
 	if err != nil {
 		log.Fatalf("Failed to create serial configuration: %s", err)
@@ -166,9 +175,73 @@ func main() {
 	signalCh := make(chan os.Signal, 1)
 	signal.Notify(signalCh, syscall.SIGTERM)
 
+	log.Println("start vm")
+	
+
 	if err := vm.Start(); err != nil {
 		log.Fatalf("Start virtual machine is failed: %s", err)
 	}
+
+
+	// Start a goroutine to write to the virtual stdin
+	go func() {
+		// Wait for 1 second before writing to virtual stdin
+		time.Sleep(1 * time.Second)
+
+		log.Println("Logging in via virtual stdin")
+
+		_, err := io.WriteString(virtualStdinWriter, "root\n")
+		if err != nil {
+			log.Printf("Failed to write to virtual stdin: %s", err)
+		}
+
+		// Wait 100ms
+		time.Sleep(100 * time.Millisecond)
+
+		// Send password
+		_, err = io.WriteString(virtualStdinWriter, "passwd\n")
+		if err != nil {
+			log.Printf("Failed to write to virtual stdin: %s", err)
+		}
+
+		// Probe what shell it is
+		_, err = io.WriteString(virtualStdinWriter, "echo $SHELL\n")
+		if err != nil {
+			log.Printf("Failed to write to virtual stdin: %s", err)
+		}
+
+		// Write the generic shell script
+		_, err = io.WriteString(virtualStdinWriter, `
+count=0
+while true; do
+    echo "hello $count"
+    count=$((count + 1))
+    sleep 1
+done
+`)
+		if err != nil {
+			log.Printf("Failed to write to virtual stdin: %s", err)
+		}
+
+		time.Sleep(5000 * time.Millisecond)
+
+		virtualStdinWriter.Close()
+	
+		// Stop the VM
+		log.Println("Request stop VM")
+		result, err := vm.RequestStop()
+		if err != nil {
+			log.Println("request stop error:", err)
+		}
+		
+		// if it stopped, finish the program
+		if result {
+			log.Println("stopped successfully")
+			os.Exit(0)
+			return
+		}
+
+	}()
 
 	errCh := make(chan error, 1)
 
