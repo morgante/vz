@@ -109,20 +109,20 @@ func createVMConfig(vmlinuz, initrd, diskPath string, virtualStdin *os.File) (*v
 		entropyConfig,
 	})
 
-	diskImageAttachment, err := vz.NewDiskImageStorageDeviceAttachment(
-		diskPath,
-		false,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("Disk image attachment creation failed: %w", err)
-	}
-	storageDeviceConfig, err := vz.NewVirtioBlockDeviceConfiguration(diskImageAttachment)
-	if err != nil {
-		return nil, fmt.Errorf("Block device creation failed: %w", err)
-	}
-	config.SetStorageDevicesVirtualMachineConfiguration([]vz.StorageDeviceConfiguration{
-		storageDeviceConfig,
-	})
+	// diskImageAttachment, err := vz.NewDiskImageStorageDeviceAttachment(
+	// 	diskPath,
+	// 	false,
+	// )
+	// if err != nil {
+	// 	return nil, fmt.Errorf("Disk image attachment creation failed: %w", err)
+	// }
+	// storageDeviceConfig, err := vz.NewVirtioBlockDeviceConfiguration(diskImageAttachment)
+	// if err != nil {
+	// 	return nil, fmt.Errorf("Block device creation failed: %w", err)
+	// }
+	// config.SetStorageDevicesVirtualMachineConfiguration([]vz.StorageDeviceConfiguration{
+	// 	storageDeviceConfig,
+	// })
 
 	// traditional memory balloon device which allows for managing guest memory. (optional)
 	// Note this is not supported for snapshotting
@@ -267,7 +267,14 @@ done
 		time.Sleep(1 * time.Second)
 
 		// Now let's make a whole new VM with the same config
-		newVM, err := vz.NewVirtualMachine(config)
+		// secondConfig, err := createVMConfig(vmlinuz, initrd, diskPath, virtualStdin)
+		secondConfig := config
+		if err != nil {
+			log.Println("second VM config creation failed:", err)
+			os.Exit(1)
+		}
+
+		newVM, err := vz.NewVirtualMachine(secondConfig)
 		if err != nil {
 			log.Println("new VM creation failed:", err)
 			os.Exit(1)
@@ -282,6 +289,36 @@ done
 
 		// Resume the VM
 		if err := newVM.Resume(); err != nil {
+			log.Println("resume error:", err)
+			os.Exit(1)
+		}
+
+		// Make a third VM
+		// Create a new disk path for the third VM
+		// diskPath2 := diskPath + ".2"
+		// _, err = os.Create(diskPath2)
+		// if err != nil {
+		// 	log.Println("create disk error:", err)
+		// 	os.Exit(1)
+		// }
+		// log.Printf("Created new disk at %s for third VM", diskPath2)
+		// thirdConfig, err := createVMConfig(vmlinuz, initrd, diskPath, virtualStdin)
+		// if err != nil {
+		// 	log.Println("third VM config creation failed:", err)
+		// 	os.Exit(1)
+		// }
+
+		thirdConfig := config
+		thirdVM, err := vz.NewVirtualMachine(thirdConfig)
+		if err != nil {
+			log.Println("third VM creation failed:", err)
+			os.Exit(1)
+		}
+		if err := thirdVM.RestoreMachineStateFromURL("savestate"); err != nil {
+			log.Println("restore state error:", err)
+			os.Exit(1)
+		}
+		if err := thirdVM.Resume(); err != nil {
 			log.Println("resume error:", err)
 			os.Exit(1)
 		}
