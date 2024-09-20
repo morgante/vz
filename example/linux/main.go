@@ -39,6 +39,111 @@ func setRawMode(f *os.File) {
 	termios.Tcsetattr(f.Fd(), termios.TCSANOW, &attr)
 }
 
+// createVMConfig creates a new VirtualMachineConfiguration with the provided parameters.
+func createVMConfig(vmlinuz, initrd, diskPath string, virtualStdinWriter *os.File, kernelCommandLineArguments []string) (*vz.VirtualMachineConfiguration, error) {
+	bootLoader, err := vz.NewLinuxBootLoader(
+		vmlinuz,
+		vz.WithCommandLine(strings.Join(kernelCommandLineArguments, " ")),
+		vz.WithInitrd(initrd),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("bootloader creation failed: %w", err)
+	}
+
+	config, err := vz.NewVirtualMachineConfiguration(
+		bootLoader,
+		1,                // numCPUs
+		2*1024*1024*1024, // memorySize
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create virtual machine configuration: %w", err)
+	}
+
+	// Create a pipe for virtual stdin
+	virtualStdin, virtualStdinWriter, err := os.Pipe()
+	if err != nil {
+		return nil, fmt.Errorf("Failed to create virtual stdin pipe: %w", err)
+	}
+
+	// Use the read end of the pipe as virtual stdin
+	serialPortAttachment, err := vz.NewFileHandleSerialPortAttachment(virtualStdin, os.Stdout)
+	if err != nil {
+		return nil, fmt.Errorf("Serial port attachment creation failed: %w", err)
+	}
+
+	// console
+	consoleConfig, err := vz.NewVirtioConsoleDeviceSerialPortConfiguration(serialPortAttachment)
+	if err != nil {
+		return nil, fmt.Errorf("Failed to create serial configuration: %w", err)
+	}
+	config.SetSerialPortsVirtualMachineConfiguration([]*vz.VirtioConsoleDeviceSerialPortConfiguration{
+		consoleConfig,
+	})
+
+	// network
+	natAttachment, err := vz.NewNATNetworkDeviceAttachment()
+	if err != nil {
+		return nil, fmt.Errorf("NAT network device creation failed: %w", err)
+	}
+	networkConfig, err := vz.NewVirtioNetworkDeviceConfiguration(natAttachment)
+	if err != nil {
+		return nil, fmt.Errorf("Creation of the networking configuration failed: %w", err)
+	}
+	config.SetNetworkDevicesVirtualMachineConfiguration([]*vz.VirtioNetworkDeviceConfiguration{
+		networkConfig,
+	})
+	mac, err := vz.NewRandomLocallyAdministeredMACAddress()
+	if err != nil {
+		return nil, fmt.Errorf("Random MAC address creation failed: %w", err)
+	}
+	networkConfig.SetMACAddress(mac)
+
+	// entropy
+	entropyConfig, err := vz.NewVirtioEntropyDeviceConfiguration()
+	if err != nil {
+		return nil, fmt.Errorf("Entropy device creation failed: %w", err)
+	}
+	config.SetEntropyDevicesVirtualMachineConfiguration([]*vz.VirtioEntropyDeviceConfiguration{
+		entropyConfig,
+	})
+
+	diskImageAttachment, err := vz.NewDiskImageStorageDeviceAttachment(
+		diskPath,
+		false,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("Disk image attachment creation failed: %w", err)
+	}
+	storageDeviceConfig, err := vz.NewVirtioBlockDeviceConfiguration(diskImageAttachment)
+	if err != nil {
+		return nil, fmt.Errorf("Block device creation failed: %w", err)
+	}
+	config.SetStorageDevicesVirtualMachineConfiguration([]vz.StorageDeviceConfiguration{
+		storageDeviceConfig,
+	})
+
+	// traditional memory balloon device which allows for managing guest memory. (optional)
+	// Note this is not supported for snapshotting
+	// memoryBalloonDevice, err := vz.NewVirtioTraditionalMemoryBalloonDeviceConfiguration()
+	// if err != nil {
+	// 	log.Fatalf("Balloon device creation failed: %s", err)
+	// }
+	// config.SetMemoryBalloonDevicesVirtualMachineConfiguration([]vz.MemoryBalloonDeviceConfiguration{
+	// 	memoryBalloonDevice,
+	// })
+
+	// socket device (optional)
+	vsockDevice, err := vz.NewVirtioSocketDeviceConfiguration()
+	if err != nil {
+		return nil, fmt.Errorf("virtio-vsock device creation failed: %w", err)
+	}
+	config.SetSocketDevicesVirtualMachineConfiguration([]vz.SocketDeviceConfiguration{
+		vsockDevice,
+	})
+
+	return config, nil
+}
+
 func main() {
 	file, err := os.Create("./log.log")
 	if err != nil {
@@ -63,130 +168,24 @@ func main() {
 	log.Println("initrd:", initrd)
 	log.Println("diskPath:", diskPath)
 
-	bootLoader, err := vz.NewLinuxBootLoader(
-		vmlinuz,
-		vz.WithCommandLine(strings.Join(kernelCommandLineArguments, " ")),
-		vz.WithInitrd(initrd),
-	)
+	virtualStdinWriter, err := os.Create("/tmp/virtual-stdin")
 	if err != nil {
-		log.Fatalf("bootloader creation failed: %s", err)
+		log.Fatalf("failed to create virtual stdin writer: %v", err)
 	}
-	log.Println("bootLoader:", bootLoader)
+	defer virtualStdinWriter.Close()
 
-	config, err := vz.NewVirtualMachineConfiguration(
-		bootLoader,
-		1,
-		2*1024*1024*1024,
-	)
+	config, err := createVMConfig(vmlinuz, initrd, diskPath, virtualStdinWriter, kernelCommandLineArguments)
 	if err != nil {
-		log.Fatalf("failed to create virtual machine configuration: %s", err)
-	}
-
-	// Create a pipe for virtual stdin
-	virtualStdin, virtualStdinWriter, err := os.Pipe()
-	if err != nil {
-		log.Fatalf("Failed to create virtual stdin pipe: %s", err)
-	}
-
-	// Use the read end of the pipe as virtual stdin
-	serialPortAttachment, err := vz.NewFileHandleSerialPortAttachment(virtualStdin, os.Stdout)
-	if err != nil {
-		log.Fatalf("Serial port attachment creation failed: %s", err)
-	}
-
-	// console
-	consoleConfig, err := vz.NewVirtioConsoleDeviceSerialPortConfiguration(serialPortAttachment)
-	if err != nil {
-		log.Fatalf("Failed to create serial configuration: %s", err)
-	}
-	config.SetSerialPortsVirtualMachineConfiguration([]*vz.VirtioConsoleDeviceSerialPortConfiguration{
-		consoleConfig,
-	})
-
-	// network
-	natAttachment, err := vz.NewNATNetworkDeviceAttachment()
-	if err != nil {
-		log.Fatalf("NAT network device creation failed: %s", err)
-	}
-	networkConfig, err := vz.NewVirtioNetworkDeviceConfiguration(natAttachment)
-	if err != nil {
-		log.Fatalf("Creation of the networking configuration failed: %s", err)
-	}
-	config.SetNetworkDevicesVirtualMachineConfiguration([]*vz.VirtioNetworkDeviceConfiguration{
-		networkConfig,
-	})
-	mac, err := vz.NewRandomLocallyAdministeredMACAddress()
-	if err != nil {
-		log.Fatalf("Random MAC address creation failed: %s", err)
-	}
-	networkConfig.SetMACAddress(mac)
-
-	// entropy
-	entropyConfig, err := vz.NewVirtioEntropyDeviceConfiguration()
-	if err != nil {
-		log.Fatalf("Entropy device creation failed: %s", err)
-	}
-	config.SetEntropyDevicesVirtualMachineConfiguration([]*vz.VirtioEntropyDeviceConfiguration{
-		entropyConfig,
-	})
-
-	diskImageAttachment, err := vz.NewDiskImageStorageDeviceAttachment(
-		diskPath,
-		false,
-	)
-	if err != nil {
-		log.Fatal(err)
-	}
-	storageDeviceConfig, err := vz.NewVirtioBlockDeviceConfiguration(diskImageAttachment)
-	if err != nil {
-		log.Fatalf("Block device creation failed: %s", err)
-	}
-	config.SetStorageDevicesVirtualMachineConfiguration([]vz.StorageDeviceConfiguration{
-		storageDeviceConfig,
-	})
-
-	// traditional memory balloon device which allows for managing guest memory. (optional)
-	// Note this is not supported for snapshotting
-	// memoryBalloonDevice, err := vz.NewVirtioTraditionalMemoryBalloonDeviceConfiguration()
-	// if err != nil {
-	// 	log.Fatalf("Balloon device creation failed: %s", err)
-	// }
-	// config.SetMemoryBalloonDevicesVirtualMachineConfiguration([]vz.MemoryBalloonDeviceConfiguration{
-	// 	memoryBalloonDevice,
-	// })
-
-	// socket device (optional)
-	vsockDevice, err := vz.NewVirtioSocketDeviceConfiguration()
-	if err != nil {
-		log.Fatalf("virtio-vsock device creation failed: %s", err)
-	}
-	config.SetSocketDevicesVirtualMachineConfiguration([]vz.SocketDeviceConfiguration{
-		vsockDevice,
-	})
-	validated, err := config.Validate()
-	if !validated || err != nil {
-		log.Fatal("validation failed", err)
-	}
-
-	// Validate it supports save state
-	supportsSaveMachineState, err := config.ValidateSaveRestoreSupport()
-	if !supportsSaveMachineState || err != nil {
-		log.Fatal("save state is not supported", err)
+		log.Fatalf("failed to create VM config: %v", err)
 	}
 
 	vm, err := vz.NewVirtualMachine(config)
 	if err != nil {
-		log.Fatalf("Virtual machine creation failed: %s", err)
+		log.Fatalf("failed to create VM: %v", err)
 	}
 
 	signalCh := make(chan os.Signal, 1)
 	signal.Notify(signalCh, syscall.SIGTERM)
-
-	log.Println("start vm")
-
-	if err := vm.Start(); err != nil {
-		log.Fatalf("Start virtual machine is failed: %s", err)
-	}
 
 	// Start a goroutine to write to the virtual stdin
 	go func() {
