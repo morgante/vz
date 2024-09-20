@@ -40,7 +40,15 @@ func setRawMode(f *os.File) {
 }
 
 // createVMConfig creates a new VirtualMachineConfiguration with the provided parameters.
-func createVMConfig(vmlinuz, initrd, diskPath string, virtualStdinWriter *os.File, kernelCommandLineArguments []string) (*vz.VirtualMachineConfiguration, error) {
+func createVMConfig(vmlinuz, initrd, diskPath string, virtualStdin *os.File) (*vz.VirtualMachineConfiguration, error) {
+	kernelCommandLineArguments := []string{
+		// Use the first virtio console device as system console.
+		"console=hvc0",
+		// Stop in the initial ramdisk before attempting to transition to
+		// the root file system.
+		"root=/dev/vda",
+	}
+
 	bootLoader, err := vz.NewLinuxBootLoader(
 		vmlinuz,
 		vz.WithCommandLine(strings.Join(kernelCommandLineArguments, " ")),
@@ -57,12 +65,6 @@ func createVMConfig(vmlinuz, initrd, diskPath string, virtualStdinWriter *os.Fil
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create virtual machine configuration: %w", err)
-	}
-
-	// Create a pipe for virtual stdin
-	virtualStdin, virtualStdinWriter, err := os.Pipe()
-	if err != nil {
-		return nil, fmt.Errorf("Failed to create virtual stdin pipe: %w", err)
 	}
 
 	// Use the read end of the pipe as virtual stdin
@@ -152,14 +154,6 @@ func main() {
 	defer file.Close()
 	log = l.New(file, "", l.LstdFlags)
 
-	kernelCommandLineArguments := []string{
-		// Use the first virtio console device as system console.
-		"console=hvc0",
-		// Stop in the initial ramdisk before attempting to transition to
-		// the root file system.
-		"root=/dev/vda",
-	}
-
 	vmlinuz := os.Getenv("VMLINUZ_PATH")
 	initrd := os.Getenv("INITRD_PATH")
 	diskPath := os.Getenv("DISKIMG_PATH")
@@ -168,13 +162,13 @@ func main() {
 	log.Println("initrd:", initrd)
 	log.Println("diskPath:", diskPath)
 
-	virtualStdinWriter, err := os.Create("/tmp/virtual-stdin")
+	// Create a pipe for virtual stdin
+	virtualStdin, virtualStdinWriter, err := os.Pipe()
 	if err != nil {
-		log.Fatalf("failed to create virtual stdin writer: %v", err)
+		log.Fatalf("Failed to create virtual stdin pipe: %v", err)
 	}
-	defer virtualStdinWriter.Close()
 
-	config, err := createVMConfig(vmlinuz, initrd, diskPath, virtualStdinWriter, kernelCommandLineArguments)
+	config, err := createVMConfig(vmlinuz, initrd, diskPath, virtualStdin)
 	if err != nil {
 		log.Fatalf("failed to create VM config: %v", err)
 	}
@@ -189,6 +183,11 @@ func main() {
 
 	// Start a goroutine to write to the virtual stdin
 	go func() {
+		if err := vm.Start(); err != nil {
+			log.Println("start error:", err)
+			os.Exit(1)
+		}
+
 		// Wait for 1 second before writing to virtual stdin
 		time.Sleep(1 * time.Second)
 
