@@ -115,6 +115,8 @@ func newVirtualizationMachine(
 	t *testing.T,
 	configs ...func(*vz.VirtualMachineConfiguration) error,
 ) *Container {
+	fmt.Println("vmlinuz", "./testdata/Image")
+	fmt.Println("initramfs", "./testdata/initramfs.cpio.gz")
 	vmlinuz := "./testdata/Image"
 	initramfs := "./testdata/initramfs.cpio.gz"
 	bootLoader, err := vz.NewLinuxBootLoader(
