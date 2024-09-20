@@ -56,6 +56,10 @@ func main() {
 	initrd := os.Getenv("INITRD_PATH")
 	diskPath := os.Getenv("DISKIMG_PATH")
 
+	log.Println("vmlinuz:", vmlinuz)
+	log.Println("initrd:", initrd)
+	log.Println("diskPath:", diskPath)
+
 	bootLoader, err := vz.NewLinuxBootLoader(
 		vmlinuz,
 		vz.WithCommandLine(strings.Join(kernelCommandLineArguments, " ")),
@@ -171,6 +175,7 @@ func main() {
 	for {
 		select {
 		case <-signalCh:
+			log.Println("recieved signal to stop")
 			result, err := vm.RequestStop()
 			if err != nil {
 				log.Println("request stop error:", err)
